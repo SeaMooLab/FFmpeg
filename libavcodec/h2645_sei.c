@@ -27,6 +27,7 @@
 
 #include "libavutil/ambient_viewing_environment.h"
 #include "libavutil/buffer.h"
+#include "libavutil/detection_bbox.h"
 #include "libavutil/display.h"
 #include "libavutil/film_grain_params.h"
 #include "libavutil/mastering_display_metadata.h"
@@ -191,6 +192,213 @@ static int decode_ambient_viewing_environment(H2645SEIAmbientViewingEnvironment 
     return 0;
 }
 
+#if ANNOTATED_REGIONS_SEI
+static void initialize_annotated_regions(H2645SEIAnnotatedRegions *h)
+{
+    memset(h, 0, sizeof(*h));
+
+    for (int i = 0; i < ANNOTATED_REGIONS_MAX_NUM_OBJS; i++) {
+        h->object[i].object_idx = -1;
+        h->object[i].label_idx = -1;
+        h->label[i].label_idx = -1;
+    }
+}
+
+static int read_annotated_regions_string(GetBitContext *gb, char *dst, size_t dst_size)
+{
+    int index = 0;
+
+    if (!dst || !dst_size)
+        return AVERROR(EINVAL);
+
+    while ((get_bits_count(gb) % 8) != 0)
+        skip_bits1(gb);
+
+    for (;;) {
+        int data;
+
+        if (get_bits_left(gb) < 8)
+            return AVERROR_INVALIDDATA;
+
+        data = get_bits(gb, 8);
+
+        if (index + 1 < dst_size)
+            dst[index++] = (char)data;
+
+        if (data == '\0')
+            break;
+    }
+
+    dst[dst_size - 1] = '\0';
+    return 0;
+}
+
+static int decode_annotated_regions(H2645SEIAnnotatedRegions *h, GetBitContext *gb)
+{
+    h->annotated_reg_cancel_flag = get_bits1(gb);
+    h->present = !h->annotated_reg_cancel_flag;
+
+    if (!h->present) {
+        initialize_annotated_regions(h);
+        h->annotated_reg_cancel_flag = 1;
+        return 0;
+    }
+
+    h->not_optimized_for_viewing_flag = get_bits1(gb);
+    h->true_motion_flag = get_bits1(gb);
+    h->occluded_obj_flag = get_bits1(gb);
+    h->partial_obj_flag_present_flag = get_bits1(gb);
+    h->obj_label_present_flag = get_bits1(gb);
+    h->obj_conf_info_present_flag = get_bits1(gb);
+
+    if (h->obj_conf_info_present_flag)
+        h->obj_conf_length = get_bits(gb, 4) + 1;
+
+    if (h->obj_label_present_flag) {
+        h->obj_label_lang_present_flag = get_bits1(gb);
+
+        if (h->obj_label_lang_present_flag) {
+            int ret = read_annotated_regions_string(gb, h->obj_label_lang, sizeof(h->obj_label_lang));
+            if (ret < 0)
+                return ret;
+        }
+
+        h->num_label_updates = get_ue_golomb_long(gb);
+
+        for (int count = 0; count < h->num_label_updates; count++) {
+            int label_idx = get_ue_golomb_long(gb);
+
+            if (label_idx < 0 || label_idx >= ANNOTATED_REGIONS_MAX_NUM_OBJS)
+                return AVERROR_INVALIDDATA;
+
+            h->label[label_idx].label_idx = label_idx;
+            h->label[label_idx].label_valid = !get_bits1(gb);
+
+            if (h->label[label_idx].label_valid) {
+                int ret = read_annotated_regions_string(gb, h->label[label_idx].label, sizeof(h->label[label_idx].label));
+                if (ret < 0)
+                    return ret;
+            } else {
+                h->label[label_idx].label_idx = -1;
+                h->label[label_idx].label_valid = 0;
+                h->label[label_idx].label[0] = '\0';
+            }
+        }
+    }
+
+    h->num_object_updates = get_ue_golomb_long(gb);
+
+    for (int count = 0; count < h->num_object_updates; count++) {
+        int object_idx = get_ue_golomb_long(gb);
+
+        if (object_idx < 0 || object_idx >= ANNOTATED_REGIONS_MAX_NUM_OBJS)
+            return AVERROR_INVALIDDATA;
+
+        h->object[object_idx].object_idx = object_idx;
+        h->object[object_idx].object_valid = !get_bits1(gb);
+
+        if (h->object[object_idx].object_valid) {
+            int bb_update_flag;
+
+            if (h->obj_label_present_flag) {
+                int label_update_flag = get_bits1(gb);
+
+                if (label_update_flag) {
+                    int label_idx = get_ue_golomb_long(gb);
+
+                    if (label_idx < 0 || label_idx >= ANNOTATED_REGIONS_MAX_NUM_OBJS)
+                        return AVERROR_INVALIDDATA;
+
+                    h->object[object_idx].label_idx = label_idx;
+                }
+            }
+
+            bb_update_flag = get_bits1(gb);
+
+            if (bb_update_flag) {
+                h->object[object_idx].bounding_box_valid = !get_bits1(gb);
+
+                if (h->object[object_idx].bounding_box_valid) {
+                    h->object[object_idx].bounding_box_top = get_bits(gb, 16);
+                    h->object[object_idx].bounding_box_left = get_bits(gb, 16);
+                    h->object[object_idx].bounding_box_width = get_bits(gb, 16);
+                    h->object[object_idx].bounding_box_height = get_bits(gb, 16);
+
+                    if (h->partial_obj_flag_present_flag)
+                        h->object[object_idx].partial_obj_flag = get_bits1(gb);
+
+                    if (h->obj_conf_info_present_flag)
+                        h->object[object_idx].obj_confidence = get_bits(gb, h->obj_conf_length);
+                } else {
+                    h->object[object_idx].bounding_box_top = -1;
+                    h->object[object_idx].bounding_box_left = -1;
+                    h->object[object_idx].bounding_box_width = -1;
+                    h->object[object_idx].bounding_box_height = -1;
+                }
+            }
+        } else {
+            h->object[object_idx].object_idx = -1;
+            h->object[object_idx].object_valid = 0;
+            h->object[object_idx].label_idx = -1;
+            h->object[object_idx].bounding_box_valid = 0;
+        }
+    }
+
+    return 0;
+}
+
+static int add_annotated_regions_side_data(AVFrame *frame, H2645SEIAnnotatedRegions *ar)
+{
+    AVDetectionBBoxHeader *header;
+    int count = 0;
+    int out_index = 0;
+
+    if (!ar->present)
+        return 0;
+
+    for (int i = 0; i < ANNOTATED_REGIONS_MAX_NUM_OBJS; i++) {
+        if (ar->object[i].object_valid && ar->object[i].bounding_box_valid)
+            count++;
+    }
+
+    if (!count)
+        return 0;
+
+    header = av_detection_bbox_create_side_data(frame, count);
+    if (!header)
+        return AVERROR(ENOMEM);
+
+    snprintf(header->source, sizeof(header->source), "H.264/5 Annotated Regions SEI");
+
+    for (int i = 0; i < ANNOTATED_REGIONS_MAX_NUM_OBJS; i++) {
+        H2645SEIAnnotatedRegionObject *obj = &ar->object[i];
+        AVDetectionBBox *bbox;
+        int label_idx;
+
+        if (!obj->object_valid || !obj->bounding_box_valid)
+            continue;
+
+        bbox = av_get_detection_bbox(header, out_index++);
+        bbox->x = obj->bounding_box_left;
+        bbox->y = obj->bounding_box_top;
+        bbox->w = obj->bounding_box_width;
+        bbox->h = obj->bounding_box_height;
+
+        label_idx = obj->label_idx;
+        if (ar->obj_label_present_flag &&
+            label_idx >= 0 &&
+            label_idx < ANNOTATED_REGIONS_MAX_NUM_OBJS &&
+            ar->label[label_idx].label_valid &&
+            ar->label[label_idx].label[0]) {
+            snprintf(bbox->classify_labels[0], sizeof(bbox->classify_labels[0]), "%s", ar->label[label_idx].label);
+            bbox->classify_count = 1;
+        }
+    }
+
+    return 0;
+}
+#endif
+
 static int decode_film_grain_characteristics(H2645SEIFilmGrainCharacteristics *h,
                                              enum AVCodecID codec_id, GetBitContext *gb)
 {
@@ -312,6 +520,10 @@ int ff_h2645_sei_message_decode(H2645SEI *h, enum SEIType type,
                                                      gbyte);
     case SEI_TYPE_CONTENT_LIGHT_LEVEL_INFO:
         return decode_nal_sei_content_light_info(&h->content_light, gbyte);
+#if ANNOTATED_REGIONS_SEI
+    case SEI_TYPE_ANNOTATED_REGIONS:
+        return decode_annotated_regions(&h->annotated_regions, gb);
+#endif
     default:
         return FF_H2645_SEI_MESSAGE_UNHANDLED;
     }
@@ -358,6 +570,10 @@ int ff_h2645_sei_ctx_replace(H2645SEI *dst, const H2645SEI *src)
     dst->ambient_viewing_environment = src->ambient_viewing_environment;
     dst->mastering_display     = src->mastering_display;
     dst->content_light         = src->content_light;
+
+#if ANNOTATED_REGIONS_SEI
+    dst->annotated_regions    = src->annotated_regions;
+#endif
 
     av_refstruct_replace(&dst->film_grain_characteristics,
                           src->film_grain_characteristics);
@@ -618,6 +834,12 @@ FF_ENABLE_DEPRECATION_WARNINGS
     if (ret < 0)
         return ret;
 
+#if ANNOTATED_REGIONS_SEI
+    ret = add_annotated_regions_side_data(frame, &sei->annotated_regions);
+    if (ret < 0)
+        return ret;
+#endif
+
     if (itut_t35->afd) {
         if (!av_frame_new_side_data_from_buf(frame, AV_FRAME_DATA_AFD, itut_t35->afd))
             av_buffer_unref(&itut_t35->afd);
@@ -721,6 +943,10 @@ void ff_h2645_sei_reset(H2645SEI *s)
     s->ambient_viewing_environment.present = 0;
     s->mastering_display.present = 0;
     s->content_light.present = 0;
+
+#if ANNOTATED_REGIONS_SEI
+    initialize_annotated_regions(&s->annotated_regions);
+#endif
 
     av_refstruct_unref(&s->film_grain_characteristics);
 }

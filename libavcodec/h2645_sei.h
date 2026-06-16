@@ -33,6 +33,11 @@
 #include "itut35.h"
 #include "sei.h"
 
+#define ANNOTATED_REGIONS_SEI 1
+#define ANNOTATED_REGIONS_LABEL_MAX_SIZE 256
+#define ANNOTATED_REGIONS_MAX_NUM_OBJS 256
+
+
 typedef struct H2645SEIA53Caption {
     AVBufferRef *buf_ref;
 } H2645SEIA53Caption;
@@ -125,6 +130,46 @@ typedef struct H2645SEIContentLight {
     uint16_t max_pic_average_light_level;
 } H2645SEIContentLight;
 
+#if ANNOTATED_REGIONS_SEI
+typedef struct H2645SEIAnnotatedRegionLabel {
+    int label_idx;
+    int label_valid;
+    char label[ANNOTATED_REGIONS_LABEL_MAX_SIZE];
+} H2645SEIAnnotatedRegionLabel;
+
+typedef struct H2645SEIAnnotatedRegionObject {
+    int object_idx;
+    int object_valid;
+    int label_idx;
+    int bounding_box_valid;
+    int bounding_box_top;
+    int bounding_box_left;
+    int bounding_box_width;
+    int bounding_box_height;
+    int partial_obj_flag;
+    int obj_confidence;
+} H2645SEIAnnotatedRegionObject;
+
+typedef struct H2645SEIAnnotatedRegions {
+    int present;
+    int annotated_reg_cancel_flag;
+    int not_optimized_for_viewing_flag;
+    int true_motion_flag;
+    int occluded_obj_flag;
+    int partial_obj_flag_present_flag;
+    int obj_label_present_flag;
+    int obj_conf_info_present_flag;
+    int obj_conf_length;
+    int obj_label_lang_present_flag;
+    int num_label_updates;
+    int num_object_updates;
+    int num_bbox;
+    char obj_label_lang[ANNOTATED_REGIONS_LABEL_MAX_SIZE];
+    H2645SEIAnnotatedRegionLabel label[ANNOTATED_REGIONS_MAX_NUM_OBJS];
+    H2645SEIAnnotatedRegionObject object[ANNOTATED_REGIONS_MAX_NUM_OBJS];
+} H2645SEIAnnotatedRegions;
+#endif
+
 typedef struct H2645SEI {
     FFITUTT35Meta itut_t35;
     H2645SEIUnregistered unregistered;
@@ -134,6 +179,10 @@ typedef struct H2645SEI {
     H2645SEIAmbientViewingEnvironment ambient_viewing_environment;
     H2645SEIMasteringDisplay mastering_display;
     H2645SEIContentLight content_light;
+
+#if ANNOTATED_REGIONS_SEI
+    H2645SEIAnnotatedRegions annotated_regions;
+#endif
 
     // Dynamic allocations due to large size.
     H2645SEIFilmGrainCharacteristics *film_grain_characteristics;
