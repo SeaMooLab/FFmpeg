@@ -56,7 +56,7 @@ static AVMutex mutex = AV_MUTEX_INITIALIZER;
 #define BACKTRACE_LOGLEVEL AV_LOG_ERROR
 #endif
 
-static atomic_int av_log_level = AV_LOG_INFO;
+static atomic_int av_log_level = AV_LOG_ERROR;
 static atomic_int av_log_flags = 0;
 
 #define NB_LEVELS 8

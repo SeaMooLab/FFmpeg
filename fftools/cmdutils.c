@@ -57,7 +57,7 @@ AVDictionary *sws_dict;
 AVDictionary *swr_opts;
 AVDictionary *format_opts, *codec_opts;
 
-int hide_banner = 0;
+int hide_banner = 1;
 
 void uninit_opts(void)
 {

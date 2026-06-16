@@ -1505,7 +1505,7 @@ static int hw_device_setup_for_decode(DecoderPriv *dp,
         } else {
             av_log(dp, AV_LOG_INFO, "Auto hwaccel "
                    "disabled: no device found.\n");
-            dp->hwaccel_id = HWACCEL_NONE;
+            dp->hwaccel_id = HWACCEL_AUTO;
             return 0;
         }
     }
